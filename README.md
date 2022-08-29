@@ -48,7 +48,7 @@ This program also utilizes multithreading through `tokio::task` in order to make
 
 # Efficiency
 
-Searching performance is about `15315` keys per second per thread (core) in Hetzner `CPX31` cloud VPS.
+Using database of `33,165,253` addresses, searching performance is about `15315` private keys per second per thread (core) running on Hetzner `CPX31` cloud VPS.
 # Database FAQ
 
 An offline database is used to find the balance of generated Bitcoin addresses. Visit <a href="/database/">/database</a> for information.
