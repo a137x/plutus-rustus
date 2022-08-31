@@ -5,7 +5,7 @@ extern crate num_cpus;
 use std::fs::{self, OpenOptions};
 use std::sync::{Arc, RwLock};
 use std::{
-    collections::BTreeMap,
+    collections::HashSet,
     fs::File,
     io::{Read, Write},
     time::Instant,
@@ -23,8 +23,8 @@ const DB_VER: &str = "MAR_15_2021";
 #[tokio::main]
 async fn main() {
     // creating empty database
-    let mut database: BTreeMap<String, String> = BTreeMap::new();
-
+    // let mut database: BTreeMap<String, String> = BTreeMap::new();
+    let mut database = HashSet::new();
     let timer = Instant::now();
     let files = fs::read_dir(get_db_dir().as_str()).unwrap();
     for file in files {
@@ -35,7 +35,7 @@ async fn main() {
             let data = load_pickle_slice(file.path().to_str().unwrap());
             // adding addresses to database
             for ad in data.iter() {
-                database.insert(ad.to_string(), ad.to_string());
+                database.insert(ad.to_string());
             }
             //database size
             println!("Database size {:?} addresses.", database.len());
@@ -82,12 +82,12 @@ fn check_address(
     private_key: &PrivateKey,
     secret_key: SecretKey,
     address: &Address,
-    database: &BTreeMap<String, String>,
+    database: &HashSet<String>,
     public_key: PublicKey,
 ) {
     let address_string = address.to_string();
     let _control_address = "15x5ugXCVkzTbs24mG2bu1RkpshW3FTYW8".to_string();
-    if database.contains_key(&address_string) {
+    if database.contains(&address_string) {
         let data = format!(
             "{}{}{}{}{}{}{}{}{}",
             secret_key.display_secret(),
@@ -129,7 +129,7 @@ fn found_file_path() -> String {
 }
 
 // infinite loop processing function
-fn process(database: &BTreeMap<String, String>) {
+fn process(database: &HashSet<String>) {
     let mut count: f64 = 0.0;
     let start = Instant::now();
     loop {
