@@ -23,7 +23,6 @@ const DB_VER: &str = "MAR_15_2021";
 #[tokio::main]
 async fn main() {
     // creating empty database
-    // let mut database: BTreeMap<String, String> = BTreeMap::new();
     let mut database = HashSet::new();
     let timer = Instant::now();
     let files = fs::read_dir(get_db_dir().as_str()).unwrap();
@@ -53,9 +52,9 @@ async fn main() {
     // Multithread version of processing using tokio
     // atomic reference counting of database
     let database_ = Arc::new(RwLock::new(database));
-    //get number of physical cores
-    let num_cores = num_cpus::get_physical();
-    println!("Running on {} cores", num_cores);
+    //get number of logical cores
+    let num_cores = num_cpus::get();
+    println!("Running on {} logical cores", num_cores);
     //run process on all available cores
     for _ in 0..num_cores {
         let clone_database_ = Arc::clone(&database_);
