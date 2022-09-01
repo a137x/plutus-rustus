@@ -29,6 +29,10 @@ cargo rustc --release -- -C target-cpu=native
 ```
 ./target/release/plutus-rustus
 ```
+## For linux users to run program in the background (dettach from ssh session):
+```bash
+bash start.sh & disown
+```
 
 # Proof Of Concept
 
