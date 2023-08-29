@@ -1,8 +1,0 @@
-If you find a Bitcoin wallet with a balance, the wallet details will show up here:
-
-4ef862ae89545a25cb75e1d56b19aef02fae6fdaea8f6cbeacf8e58e22edd480 // private key
-KysDe6HB1oPnUGCuXT88Pppqu1Td9WVDzgCYes9x4B1S5aL7bd2e // hex private key in Wallet Import Format
-030bdfccb1fd2aac06cec7e688f944632a8ec33871cfaedfdd08e51f462a4e9532 // public key
-15x5ugXCVkzTbs24mG2bu1RkpshW3FTYW8 // P2PKH wallet address
-
-//-------------------------------
