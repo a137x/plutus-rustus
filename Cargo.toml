@@ -6,9 +6,9 @@ edition = "2021"
 
 [dependencies]
 rand = "0.8.5"
-bitcoin = "0.29.1"
-secp256k1 = {version = "0.24.0", features = ["rand"]}
-serde = {version = "1.0.130", features = ["derive"]}
-serde-pickle = "1.0"
-num_cpus = "1.13.0"
+bitcoin = "0.30.1"
+secp256k1 = {version = "0.27.0", features = ["rand"]}
+serde = {version = "1.0.188", features = ["derive"]}
+serde-pickle = "1.1.1"
+num_cpus = "1.16.0"
 tokio = { version = "1.20.1", features = ["full"] }

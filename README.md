@@ -52,7 +52,7 @@ This program also utilizes multithreading through `tokio::task` in order to make
 
 # Efficiency
 
-Using database of `33,165,253` addresses, searching performance is about `15981` private keys per second per thread (core) running on Hetzner `CPX31` cloud VPS.
+Using database of `33,165,253` addresses, searching performance is about `34750` private keys per second per thread (core) running on Hetzner `CPX31` cloud VPS.
 # Database FAQ
 
 An offline database is used to find the balance of generated Bitcoin addresses. Visit <a href="/database/">/database</a> for information.
@@ -91,7 +91,7 @@ If a wallet with a balance is found, then all necessary information about the wa
 >15x5ugXCVkzTbs24mG2bu1RkpshW3FTYW8 // P2PKH wallet address
 
 # Memory Consumption
-This program uses approximately 3331 MB of RAM with <a href="/database/">current database</a> of `33,165,253` Bitcoin addresses. Memory consumption solely depends on size of database, and indifferent to amount of threads (cores) it runs on.
+This program uses approximately `3347` MB of RAM with <a href="/database/">current database</a> of `33,165,253` Bitcoin addresses. Memory consumption solely depends on size of database, and indifferent to amount of threads (cores) it runs on.
 
 
 <a href="https://github.com/a137x/plutus-rustus/issues">Create an issue</a> so I can add more stuff to improve

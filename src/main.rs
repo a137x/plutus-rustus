@@ -1,6 +1,6 @@
 extern crate bitcoin;
-extern crate secp256k1;
 extern crate num_cpus;
+extern crate secp256k1;
 
 use std::fs::{self, OpenOptions};
 use std::sync::{Arc, RwLock};
@@ -11,10 +11,9 @@ use std::{
     time::Instant,
 };
 
-use secp256k1::{rand, Secp256k1, SecretKey};
-use bitcoin::util::address::Address;
-use bitcoin::util::key;
+use bitcoin::Address;
 use bitcoin::{network::constants::Network, PrivateKey, PublicKey};
+use secp256k1::{rand, Secp256k1, SecretKey};
 
 use tokio::task;
 
@@ -136,7 +135,7 @@ fn process(database: &HashSet<String>) {
         let secp = Secp256k1::new();
         let secret_key = SecretKey::new(&mut rand::thread_rng());
         let private_key = PrivateKey::new(secret_key, Network::Bitcoin);
-        let public_key = key::PublicKey::from_private_key(&secp, &private_key);
+        let public_key = PublicKey::from_private_key(&secp, &private_key);
         // Generate pay-to-pubkey-hash (P2PKH) wallet address
         let address = Address::p2pkh(&public_key, Network::Bitcoin);
 
@@ -145,7 +144,7 @@ fn process(database: &HashSet<String>) {
 
         // FOR BENCHMARKING ONLY! (has to be commented out for performance gain)
         count += 1.0;
-        if count % 10000.0 == 0.0 {
+        if count % 100000.0 == 0.0 {
             let current_core = std::thread::current().id();
             let elapsed = start.elapsed().as_secs_f64();
             println!(
