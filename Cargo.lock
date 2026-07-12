@@ -191,6 +191,7 @@ name = "plutus-rustus"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
+ "cc",
  "num_cpus",
  "rand",
  "ripemd",

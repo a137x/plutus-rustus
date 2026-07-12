@@ -2,11 +2,18 @@
 //
 // Strategy (see README "Efficiency"): instead of drawing a fresh random private
 // key every iteration (one full elliptic-curve scalar multiplication each), every
-// worker draws ONE random starting key and then walks sequentially using point
-// addition — pub_{n+1} = pub_n + G — which is a single group operation. The secret
-// that corresponds to pub_n is simply (start_secret + n) mod curve_order, so a hit
-// is fully reconstructable. Addresses are matched as raw 20-byte hash160 values, so
-// there is no Base58 encoding in the hot loop.
+// worker draws ONE random starting key and then walks sequentially — the public
+// key of key+1 is key's public key plus the generator G. The secret behind the
+// n-th key is simply (start_secret + n) mod curve_order, so any hit is fully
+// reconstructable, and addresses are matched as raw 20-byte hash160 values (no
+// Base58 in the hot loop).
+//
+// The single biggest cost is converting each running point back to affine
+// coordinates for hashing, which needs one field inversion per key. We amortise
+// that: a batch of `BATCH` points is accumulated in Jacobian coordinates (no
+// inversion) and converted to affine with ONE inversion for the whole batch
+// (Montgomery batch inversion), inside the vendored-libsecp256k1 shim in
+// `csrc/shim.c`. See the `ec` module below.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -31,9 +38,83 @@ const DB_VER: &str = "JUL_11_2026";
 // is a clean 1-address-per-key figure; flip to `true` to maximise coverage.
 const CHECK_UNCOMPRESSED: bool = false;
 
+// Number of consecutive keys produced per shim call and amortised under a single
+// field inversion. Past ~64 the inversion is fully amortised; 512 keeps the
+// scratch buffers comfortably in L2. Also the granularity of the shared counter.
+const BATCH: usize = 512;
+
+// After this many keys a worker draws a fresh random starting point instead of
+// walking on forever, so coverage stays spread across the key space and the
+// per-walk offset stays small. ~1.07e9 keys ≈ minutes of walking per stretch.
+const WALK_SPAN: u64 = 1 << 30;
+
 // Each worker sums keys locally and publishes to the shared counter in blocks of
 // this size, so the atomic is touched rarely (no per-key cache-line contention).
 const REPORT_BLOCK: u64 = 1 << 17; // 131_072
+
+// ---------------------------------------------------------------------------
+// Batched elliptic-curve walk (FFI to csrc/shim.c over vendored libsecp256k1).
+//
+// One `Walk` per worker thread — it owns C-side scratch buffers and a running
+// Jacobian point, so it must not be shared between threads (it is `Send`, not
+// `Sync`). Each `batch` call emits `n` consecutive compressed public keys (and,
+// optionally, their uncompressed encodings) using one field inversion total.
+// ---------------------------------------------------------------------------
+mod ec {
+    use std::ffi::c_void;
+
+    extern "C" {
+        fn ec_walk_new(cap: usize) -> *mut c_void;
+        fn ec_walk_set_start(w: *mut c_void, pubkey: *const u8, len: usize) -> i32;
+        fn ec_walk_batch(w: *mut c_void, n: usize, out_comp: *mut u8, out_uncomp: *mut u8);
+        fn ec_walk_free(w: *mut c_void);
+    }
+
+    pub struct Walk {
+        raw: *mut c_void,
+        cap: usize,
+    }
+
+    // Safe to move to another thread: it owns its own C state exclusively.
+    unsafe impl Send for Walk {}
+
+    impl Walk {
+        /// Create a walker able to emit up to `cap` keys per `batch` call.
+        pub fn new(cap: usize) -> Self {
+            let raw = unsafe { ec_walk_new(cap) };
+            assert!(!raw.is_null(), "ec_walk_new: allocation failed");
+            Walk { raw, cap }
+        }
+
+        /// Seed the running point from a serialized public key (33 or 65 bytes).
+        /// Returns `false` if libsecp256k1 rejects the encoding.
+        pub fn set_start(&mut self, pubkey: &[u8]) -> bool {
+            unsafe { ec_walk_set_start(self.raw, pubkey.as_ptr(), pubkey.len()) == 1 }
+        }
+
+        /// Emit `n` consecutive public keys into `comp` (n*33 bytes) and, if
+        /// `uncomp` is `Some`, their uncompressed encodings (n*65 bytes). Then the
+        /// running point advances by `n` so the next call is contiguous.
+        pub fn batch(&mut self, n: usize, comp: &mut [u8], uncomp: Option<&mut [u8]>) {
+            assert!(n <= self.cap, "batch {n} exceeds capacity {}", self.cap);
+            assert!(comp.len() >= n * 33, "compressed buffer too small");
+            let up = match uncomp {
+                Some(u) => {
+                    assert!(u.len() >= n * 65, "uncompressed buffer too small");
+                    u.as_mut_ptr()
+                }
+                None => std::ptr::null_mut(),
+            };
+            unsafe { ec_walk_batch(self.raw, n, comp.as_mut_ptr(), up) };
+        }
+    }
+
+    impl Drop for Walk {
+        fn drop(&mut self) {
+            unsafe { ec_walk_free(self.raw) };
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Fast hasher for hash160 keys.
@@ -70,12 +151,39 @@ fn hash160(data: &[u8]) -> [u8; 20] {
     out
 }
 
+// hash160 for a whole batch of `n` consecutive 33-byte compressed pubkeys in
+// `comp`, writing `n` 20-byte results into `out`. On aarch64 this dispatches to
+// the SIMD path in csrc/hash_neon.c (ARMv8 SHA-256 + 4-way NEON RIPEMD-160,
+// ~3.4x the crate); every other target uses the sha2/ripemd crates.
+#[cfg(neon_hash)]
+fn hash_batch(comp: &[u8], out: &mut [u8], n: usize) {
+    extern "C" {
+        fn hash160_many(pubkeys: *const u8, out20: *mut u8, n: usize);
+    }
+    debug_assert!(comp.len() >= n * 33 && out.len() >= n * 20);
+    unsafe { hash160_many(comp.as_ptr(), out.as_mut_ptr(), n) };
+}
+
+#[cfg(not(neon_hash))]
+fn hash_batch(comp: &[u8], out: &mut [u8], n: usize) {
+    for i in 0..n {
+        let h = hash160(&comp[i * 33..i * 33 + 33]);
+        out[i * 20..i * 20 + 20].copy_from_slice(&h);
+    }
+}
+
 fn main() {
     let db = Arc::new(load_database());
     let secp = Arc::new(Secp256k1::new());
 
-    let num_cores = num_cpus::get();
-    println!("Running on {} logical cores", num_cores);
+    // Worker count: all logical cores by default, or PLUTUS_THREADS if set (useful
+    // to keep the machine responsive, or to pin work to performance cores).
+    let num_cores = std::env::var("PLUTUS_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(num_cpus::get);
+    println!("Running on {} worker thread(s)", num_cores);
 
     let counter = Arc::new(AtomicU64::new(0));
 
@@ -106,54 +214,71 @@ fn main() {
 }
 
 // ---------------------------------------------------------------------------
-// Hot loop: sequential public keys via point addition, matched on hash160.
+// Hot loop: batched sequential public keys, matched on hash160.
 // ---------------------------------------------------------------------------
 fn process(db: &Db, secp: &Secp256k1<All>, counter: &AtomicU64) {
     let mut rng = rand::thread_rng();
-    let g = generator(secp);
+    let mut walk = ec::Walk::new(BATCH);
+
+    // Reusable output buffers for the shim (never reallocated).
+    let mut comp = vec![0u8; BATCH * 33];
+    let mut h160 = vec![0u8; BATCH * 20];
+    let mut uncomp = if CHECK_UNCOMPRESSED {
+        vec![0u8; BATCH * 65]
+    } else {
+        Vec::new()
+    };
+
+    let mut since_report: u64 = 0;
 
     loop {
-        // Fresh random starting point for this walk.
+        // Fresh random starting point; seed the walker with its public key.
         let start_secret = random_secret(&mut rng);
-        let mut pubkey = PublicKey::from_secret_key(secp, &start_secret);
-        let mut offset: u64 = 0;
-        let mut since_report: u64 = 0;
+        let start_pub = PublicKey::from_secret_key(secp, &start_secret);
+        if !walk.set_start(&start_pub.serialize()) {
+            continue; // unreachable for a valid secret key, but stay robust.
+        }
 
-        loop {
-            // Compressed P2PKH.
-            let hash = hash160(&pubkey.serialize());
-            if db.contains(&hash) {
-                report_hit(secp, &start_secret, offset, true);
+        // Walk a long contiguous stretch from this start, in batches.
+        let mut base: u64 = 0;
+        while base < WALK_SPAN {
+            if CHECK_UNCOMPRESSED {
+                walk.batch(BATCH, &mut comp, Some(&mut uncomp));
+            } else {
+                walk.batch(BATCH, &mut comp, None);
             }
 
-            // Optional uncompressed P2PKH (same key, different encoding).
-            if CHECK_UNCOMPRESSED {
-                let hash_u = hash160(&pubkey.serialize_uncompressed());
-                if db.contains(&hash_u) {
-                    report_hit(secp, &start_secret, offset, false);
+            // hash the whole batch of compressed pubkeys in one shot.
+            hash_batch(&comp, &mut h160, BATCH);
+
+            for (i, chunk) in h160.chunks_exact(20).enumerate() {
+                let hash: &[u8; 20] = chunk.try_into().unwrap();
+                if db.contains(hash) {
+                    report_hit(secp, &start_secret, base + i as u64, true);
+                }
+
+                if CHECK_UNCOMPRESSED {
+                    let hash_u = hash160(&uncomp[i * 65..i * 65 + 65]);
+                    if db.contains(&hash_u) {
+                        report_hit(secp, &start_secret, base + i as u64, false);
+                    }
                 }
             }
 
-            // Advance to the next key: pub += G  (i.e. secret += 1).
-            match pubkey.combine(&g) {
-                Ok(next) => pubkey = next,
-                // Landed on the point at infinity (secret + offset == order):
-                // ~2^-256 event; just start a new random walk.
-                Err(_) => break,
-            }
-            offset += 1;
-
-            since_report += 1;
-            if since_report == REPORT_BLOCK {
-                counter.fetch_add(REPORT_BLOCK, Ordering::Relaxed);
+            base += BATCH as u64;
+            since_report += BATCH as u64;
+            if since_report >= REPORT_BLOCK {
+                counter.fetch_add(since_report, Ordering::Relaxed);
                 since_report = 0;
             }
         }
     }
 }
 
-/// The secp256k1 generator point G as a `PublicKey` (1 · G), used as the per-step
-/// addend so `combine` performs a plain point addition.
+/// The secp256k1 generator point G as a `PublicKey` (1 · G). Used by the tests as
+/// the per-step addend so `combine` performs a plain point addition, mirroring the
+/// shim's internal `+G` walk.
+#[cfg(test)]
 fn generator(secp: &Secp256k1<All>) -> PublicKey {
     let mut one = [0u8; 32];
     one[31] = 1;
@@ -336,6 +461,104 @@ mod tests {
             tweak[24..].copy_from_slice(&offset.to_be_bytes());
             let sk = start.add_tweak(&Scalar::from_be_bytes(tweak).unwrap()).unwrap();
             assert_eq!(pk, PublicKey::from_secret_key(&secp, &sk), "offset {offset}");
+            pk = pk.combine(&g).unwrap();
+        }
+    }
+
+    // The batched shim must produce exactly the same compressed public keys as a
+    // per-key `combine` walk — a fast-but-wrong batch would never match the DB.
+    #[test]
+    fn batch_walk_matches_combine() {
+        let secp = Secp256k1::new();
+        let g = generator(&secp);
+        let start_pub = PublicKey::from_secret_key(&secp, &secret_from_u8(77));
+
+        let n = 4096usize;
+        let mut walk = ec::Walk::new(n);
+        assert!(walk.set_start(&start_pub.serialize()));
+        let mut comp = vec![0u8; n * 33];
+        walk.batch(n, &mut comp, None);
+
+        let mut pk = start_pub;
+        for i in 0..n {
+            assert_eq!(&comp[i * 33..i * 33 + 33], &pk.serialize()[..], "offset {i}");
+            pk = pk.combine(&g).unwrap();
+        }
+    }
+
+    // Consecutive batches must be contiguous: the running point has to advance by
+    // exactly `n` between calls, or offsets would double-count / skip keys.
+    #[test]
+    fn batch_walk_continues_across_calls() {
+        let secp = Secp256k1::new();
+        let g = generator(&secp);
+        let start_pub = PublicKey::from_secret_key(&secp, &secret_from_u8(5));
+
+        let n = 300usize;
+        let mut walk = ec::Walk::new(n);
+        assert!(walk.set_start(&start_pub.serialize()));
+        let mut first = vec![0u8; n * 33];
+        let mut second = vec![0u8; n * 33];
+        walk.batch(n, &mut first, None);
+        walk.batch(n, &mut second, None);
+
+        // Advance a reference walk to key #n, then compare the second batch.
+        let mut pk = start_pub;
+        for _ in 0..n {
+            pk = pk.combine(&g).unwrap();
+        }
+        for i in 0..n {
+            assert_eq!(&second[i * 33..i * 33 + 33], &pk.serialize()[..], "offset {}", n + i);
+            pk = pk.combine(&g).unwrap();
+        }
+    }
+
+    // The SIMD batch hasher must match the scalar crate hash160 for every key,
+    // including a non-multiple-of-4 tail (remainder path in hash160_many).
+    #[cfg(neon_hash)]
+    #[test]
+    fn neon_batch_hash160_matches_crate() {
+        let secp = Secp256k1::new();
+        let start_pub = PublicKey::from_secret_key(&secp, &secret_from_u8(7));
+
+        let n = 130usize; // 130 % 4 == 2, exercises the tail
+        let mut walk = ec::Walk::new(n);
+        assert!(walk.set_start(&start_pub.serialize()));
+        let mut comp = vec![0u8; n * 33];
+        walk.batch(n, &mut comp, None);
+
+        let mut neon = vec![0u8; n * 20];
+        hash_batch(&comp, &mut neon, n);
+
+        for i in 0..n {
+            let want = hash160(&comp[i * 33..i * 33 + 33]);
+            assert_eq!(&neon[i * 20..i * 20 + 20], &want[..], "key {i}");
+        }
+    }
+
+    // With uncompressed output requested, both encodings must match `combine`, and
+    // the compressed hash160 must equal what the DB-decode path stores.
+    #[test]
+    fn batch_uncompressed_matches_combine_and_db() {
+        let secp = Secp256k1::new();
+        let g = generator(&secp);
+        // Start at key 1 so we can also check the compressed hash160 vs the DB bytes.
+        let start_pub = PublicKey::from_secret_key(&secp, &secret_from_u8(1));
+
+        let n = 16usize;
+        let mut walk = ec::Walk::new(n);
+        assert!(walk.set_start(&start_pub.serialize()));
+        let mut comp = vec![0u8; n * 33];
+        let mut unc = vec![0u8; n * 65];
+        walk.batch(n, &mut comp, Some(&mut unc));
+
+        let db_raw = bitcoin::base58::decode_check("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH").unwrap();
+        assert_eq!(&hash160(&comp[0..33])[..], &db_raw[1..21]);
+
+        let mut pk = start_pub;
+        for i in 0..n {
+            assert_eq!(&comp[i * 33..i * 33 + 33], &pk.serialize()[..], "comp {i}");
+            assert_eq!(&unc[i * 65..i * 65 + 65], &pk.serialize_uncompressed()[..], "unc {i}");
             pk = pk.combine(&g).unwrap();
         }
     }

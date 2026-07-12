@@ -2,7 +2,7 @@
 
 A Bitcoin wallet collider that brute forces random wallet addresses written in Rust.
 
-This began as a port of [Plutus](https://github.com/Isaacdelly/Plutus) and has since been substantially optimised — see [Efficiency](#efficiency) for the ~7.7x speedup over the initial port (and far larger gains over the Python original).
+This began as a port of [Plutus](https://github.com/Isaacdelly/Plutus) and has since been substantially optimised — see [Efficiency](#efficiency). On an Apple M3 Pro it now checks **~18 million keys/second** across all cores (**~2.85M single-thread**), using the same techniques that make [mattsta/Plutus](https://github.com/mattsta/Plutus) fast: a sequential elliptic-curve walk with batched (Montgomery) field inversion, and a SIMD `hash160`.
 
 # Like This Project? Give It A Star
 
@@ -10,7 +10,11 @@ This began as a port of [Plutus](https://github.com/Isaacdelly/Plutus) and has s
 
 # Dependencies
 Tested in `rustc 1.92.0`
-For dependencies see `Cargo.toml`
+For Rust dependencies see `Cargo.toml`. A C compiler is required at build time
+(`cc`): the elliptic-curve hot path uses a small C shim (`csrc/`) over a vendored
+copy of [libsecp256k1](https://github.com/bitcoin-core/secp256k1) in `depend/`.
+On aarch64 the SIMD `hash160` (`csrc/hash_neon.c`) is compiled in automatically;
+other targets fall back to the `sha2`/`ripemd` crates.
 Minimum <a href="#memory-consumption">RAM requirements</a>
 
 # Installation
@@ -34,6 +38,10 @@ cargo rustc --release -- -C target-cpu=native
 bash start.sh & disown
 ```
 
+By default one worker runs per logical core. Set `PLUTUS_THREADS=N` to cap the
+worker count — e.g. `PLUTUS_THREADS=5 ./target/release/plutus-rustus` to use only
+an M3 Pro's performance cores, or fewer to keep the machine responsive.
+
 # Proof Of Concept
 
 A private key is a secret number that allows Bitcoins to be spent. If a wallet has Bitcoins in it, then the private key will allow a person to control the wallet and spend whatever balance the wallet has. So this program attempts to find Bitcoin private keys that correlate to wallets with positive balances. However, because it is impossible to know which private keys control wallets with money and which private keys control empty wallets, we have to randomly look at every possible private key that exists and hope to find one that has a balance.
@@ -42,57 +50,67 @@ This program is essentially a brute forcing algorithm. It continuously generates
 
 # How It Works
 
-Each worker thread draws **one** random private key, then walks the key space sequentially by repeatedly adding the secp256k1 generator point `G` to the running public key (see [Efficiency](#efficiency)). Every public key is hashed to its 20-byte `hash160` — the core of a P2PKH address — using the [`secp256k1`](https://docs.rs/secp256k1), [`sha2`](https://docs.rs/sha2) and [`ripemd`](https://docs.rs/ripemd) crates. No Base58 encoding happens in the hot loop.
+Each worker thread draws **one** random private key, then walks the key space sequentially by repeatedly adding the secp256k1 generator point `G` to the running public key. The walk is done in **batches of 512** so that the whole batch shares a single elliptic-curve field inversion instead of one per key (see [Efficiency](#efficiency)). Every public key is hashed to its 20-byte `hash160` — the core of a P2PKH address — via SHA-256 then RIPEMD-160; on aarch64 this uses the ARMv8 SHA-256 instructions and a 4-wide NEON RIPEMD-160. No Base58 encoding happens in the hot loop.
 
 A pre-calculated database of P2PKH Bitcoin addresses with a positive balance is included in this project; it is decoded once to raw `hash160` bytes at startup. Each generated `hash160` is looked up in that set, and on a match the private key, public key and address are written to the text file `plutus.txt`.
 
-This program utilizes multithreading through `std::thread` (one worker per logical core) to make concurrent calculations.
+This program utilizes multithreading through `std::thread` (one worker per logical core by default; see `PLUTUS_THREADS`) to make concurrent calculations.
 
 # Efficiency
 
-Rather than drawing a fresh random private key every iteration — which costs one full
-elliptic-curve scalar multiplication each — every worker draws **one** random starting
-key and then walks the key space **sequentially** using elliptic-curve point addition:
+Every worker draws **one** random starting key and walks the key space
+**sequentially** — the public key of `key+1` is the previous public key plus the
+generator `G`, so no scalar multiplication is needed after the first key. Because
+the secret behind `pub_n` is just `(start_secret + n) mod order`, any match is
+fully reconstructable. On top of that, the two dominant hot-loop costs are attacked
+with the techniques from [mattsta/Plutus](https://github.com/mattsta/Plutus),
+implemented here in Rust over a small C shim:
 
-```
-pub_{n+1} = pub_n + G          (secret_{n+1} = secret_n + 1)
-```
+**1. Batched elliptic-curve inversion.** Even a sequential walk still pays one
+modular **field inversion per key** to bring each running point back to affine
+coordinates for hashing — the single largest cost (~80% of the loop). Instead, a
+batch of 512 points is accumulated in Jacobian coordinates (point additions, no
+inversion) and converted to affine with **one** inversion for the whole batch
+(Montgomery batch inversion). This runs on the vendored **libsecp256k1** field
+arithmetic (`depend/secp256k1`, called from `csrc/shim.c`) and is ~7x faster than
+one `combine` per key.
 
-Point addition is a single group operation, so this is dramatically cheaper than a
-scalar multiplication per key. Because the secret behind `pub_n` is just
-`(start_secret + n) mod order`, any match is fully reconstructable.
+**2. SIMD `hash160`.** `hash160 = RIPEMD-160(SHA-256(pubkey))`. On aarch64
+(`csrc/hash_neon.c`) the SHA-256 uses the ARMv8 crypto instructions and RIPEMD-160
+— which has no hardware instruction — is computed **4 keys at a time in NEON**,
+~3.4x the `sha2`/`ripemd` crates. Other targets fall back to those crates
+automatically.
 
-Two further changes remove overhead from the hot loop:
+Both paths are verified **bit-for-bit** against the reference implementations
+(`cargo test`). The database is still decoded once to raw 20-byte `hash160` values
+and matched directly — no Base58 in the loop.
 
-- **No Base58 in the loop.** The database is decoded once to raw 20-byte `hash160`
-  values and generated keys are matched as `hash160` bytes directly — no Base58Check
-  encoding per key.
-- **secp256k1 context created once** (it was previously rebuilt every iteration),
-  a compact `HashSet<[u8; 20]>` with a hash tuned for uniform hash160 keys, and
-  parallel database loading.
+Measured on an **Apple M3 Pro (5 performance + 6 efficiency cores)** with the
+`JUL_11_2026` database (21,273,320 P2PKH addresses):
 
-Measured on an **Apple M3 Pro (11 logical cores)** with the `JUL_11_2026` database
-(21,273,320 P2PKH addresses):
+| | single thread | 5 P-cores | all 11 cores |
+|---|---|---|---|
+| sequential `combine`, crate `hash160` | ~278k/s | — | ~3.15M/s |
+| + batched inversion | ~1.48M/s | ~6.75M/s | ~10.5M/s |
+| **+ SIMD `hash160`** | **~2.85M/s** | **~12.8M/s** | **~18.2M/s** |
 
-| | keys/sec (aggregate) | per core |
-|---|---|---|
-| previous (random key per iter, Base58, context-in-loop) | ~407,000 | ~37,000 |
-| current (sequential point addition, hash160 match) | **~3,150,000** | ~285,000 |
+That is roughly **10x single-thread** and **5.8x aggregate** over the previous
+version. At **~2.56M keys/s per performance core** this matches mattsta's C
+accelerator; the 11-core total is held back only by the M3's efficiency cores
+running ~⅓ the speed of a performance core (set `PLUTUS_THREADS=5` to use the
+performance cores alone). Database load is **~6s** (parallelised) and real memory
+**~0.7 GB** — only P2PKH `hash160` bytes are kept.
 
-That is roughly a **7.7x** speedup. Database load time also dropped from ~15s to
-**~6s** (parallelised), and real memory from ~3.3 GB to **~0.7 GB** — only P2PKH
-`hash160` bytes are kept instead of full Base58 address strings.
-
-> Note on techniques evaluated: a Montgomery batch-inversion approach (`k256`
-> projective points, the "textbook" fast path) was benchmarked and lost to
-> libsecp256k1's `combine` on this hardware (292k vs 476k keys/s single-thread),
-> because libsecp256k1's hand-tuned field arithmetic outweighs the saved inversions.
-> A bloom pre-filter was also benchmarked and gave no measurable gain (the tuned
-> `HashSet` lookup already costs only ~7%), so it was not added.
+> Notes on techniques evaluated: a **pure-Rust `k256`** Montgomery batch was tried
+> first and *lost* to libsecp256k1's `combine` (292k vs 476k keys/s single-thread)
+> — the batch only wins on libsecp256k1-grade field multiplies, which is why the
+> win came from batching *over libsecp256k1* rather than a different curve library.
+> A **bloom pre-filter** gave no measurable gain (the tuned `HashSet` lookup is not
+> the bottleneck, and P-core scaling stays ~linear), so it was not added.
 
 To also cover uncompressed P2PKH addresses (funded keys exist under both encodings),
 set `CHECK_UNCOMPRESSED = true` in `src/main.rs`: ~2x reachable database coverage
-for ~10-15% throughput cost.
+for ~10-15% throughput cost (the uncompressed path uses the scalar crate `hash160`).
 # Database FAQ
 
 An offline database of funded P2PKH addresses is used to check generated addresses. The bundled snapshot (`JUL_11_2026`) holds `21,273,320` currently-funded P2PKH addresses sourced from [Loyce Club](http://addresses.loyce.club/). See <a href="/database/">/database</a> for the format and refresh instructions.
@@ -107,18 +125,18 @@ Loaded "02.pickle"
 Loaded "10.pickle"
 Loaded "01.pickle"
 ...
-Loaded 21273320 unique P2PKH addresses in 6.03s (0 non-P2PKH/invalid entries skipped)
-Running on 11 logical cores
-checked        8781824 keys |    2920999 keys/s (last 3s) |    2920999 keys/s avg
-checked       19005440 keys |    3403059 keys/s (last 3s) |    3161941 keys/s avg
-checked       28704768 keys |    3227704 keys/s (last 3s) |    3183860 keys/s avg
-checked       38141952 keys |    3141693 keys/s (last 3s) |    3173322 keys/s avg
+Loaded 21273320 unique P2PKH addresses in 6.35s (0 non-P2PKH/invalid entries skipped)
+Running on 11 worker thread(s)
+checked       56623104 keys |   18822277 keys/s (last 3s) |   18822277 keys/s avg
+checked      108658688 keys |   17338990 keys/s (last 3s) |   18081525 keys/s avg
+checked      166985728 keys |   19396493 keys/s (last 3s) |   18520082 keys/s avg
+checked      223215616 keys |   18722425 keys/s (last 3s) |   18570640 keys/s avg
 ...
 ```
 
 Throughput is reported as an aggregate across all worker threads, refreshed every 3
-seconds. The `avg` column stabilises around **~3.15 million keys/sec** on an 11-core
-Apple M3 Pro.
+seconds. The `avg` column stabilises around **~18 million keys/sec** on an 11-core
+Apple M3 Pro (~2.85M single-thread).
 
 If a wallet with a balance is found, then all necessary information about the wallet will be saved to the text file `plutus.txt`. An example is:
 
