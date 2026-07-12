@@ -86,7 +86,7 @@ Both paths are verified **bit-for-bit** against the reference implementations
 and matched directly — no Base58 in the loop.
 
 Measured on an **Apple M3 Pro (5 performance + 6 efficiency cores)** with the
-`JUL_11_2026` database (21,273,320 P2PKH addresses):
+`JUL_12_2026` database (44,365,067 P2PKH + P2WPKH addresses):
 
 | | single thread | 5 P-cores | all 11 cores |
 |---|---|---|---|
@@ -98,8 +98,8 @@ That is roughly **10x single-thread** and **5.8x aggregate** over the previous
 version. At **~2.56M keys/s per performance core** this matches mattsta's C
 accelerator; the 11-core total is held back only by the M3's efficiency cores
 running ~⅓ the speed of a performance core (set `PLUTUS_THREADS=5` to use the
-performance cores alone). Database load is **~6s** (parallelised) and real memory
-**~0.7 GB** — only P2PKH `hash160` bytes are kept.
+performance cores alone). Database load is **~11s** (parallelised) and real memory
+**~1.3 GB** — raw 20-byte `hash160` values for the P2PKH + P2WPKH funded set.
 
 > Notes on techniques evaluated: a **pure-Rust `k256`** Montgomery batch was tried
 > first and *lost* to libsecp256k1's `combine` (292k vs 476k keys/s single-thread)
@@ -113,7 +113,7 @@ set `CHECK_UNCOMPRESSED = true` in `src/main.rs`: ~2x reachable database coverag
 for ~10-15% throughput cost (the uncompressed path uses the scalar crate `hash160`).
 # Database FAQ
 
-An offline database of funded addresses is used to check generated addresses. The loader keeps both **P2PKH** (`1...`) and native SegWit **P2WPKH** (`bc1q...`) addresses, since both encode `hash160(compressed pubkey)` and are matched in the same lookup. The bundled snapshot (`JUL_11_2026`) currently holds `21,273,320` P2PKH addresses sourced from [Loyce Club](http://addresses.loyce.club/); regenerate it (see <a href="/database/">/database</a>) to also include the funded P2WPKH set.
+An offline database of funded addresses is used to check generated addresses. The loader keeps both **P2PKH** (`1...`) and native SegWit **P2WPKH** (`bc1q...`) addresses, since both encode `hash160(compressed pubkey)` and are matched in the same lookup. The bundled snapshot (`JUL_12_2026`) holds `44,365,067` addresses — `21,273,320` P2PKH plus `23,091,747` P2WPKH — sourced from [Loyce Club](http://addresses.loyce.club/). See <a href="/database/">/database</a> for the format and refresh instructions.
 
 # Expected Output
 
@@ -125,7 +125,7 @@ Loaded "02.pickle"
 Loaded "10.pickle"
 Loaded "01.pickle"
 ...
-Loaded 21273320 unique P2PKH addresses in 6.35s (0 non-P2PKH/invalid entries skipped)
+Loaded 44358226 unique funded hash160s (P2PKH + P2WPKH) in 11.31s (0 other/invalid entries skipped)
 Running on 11 worker thread(s)
 checked       56623104 keys |   18822277 keys/s (last 3s) |   18822277 keys/s avg
 checked      108658688 keys |   17338990 keys/s (last 3s) |   18081525 keys/s avg
@@ -146,9 +146,9 @@ If a wallet with a balance is found, then all necessary information about the wa
 >15x5ugXCVkzTbs24mG2bu1RkpshW3FTYW8 // P2PKH wallet address
 
 # Memory Consumption
-This program uses approximately `0.7` GB of real memory (~670 MB, as reported by Activity Monitor's *Real Memory Size*) with the <a href="/database/">current database</a> (`21,273,320` addresses kept as raw 20-byte `hash160` values). Memory consumption depends on database size and is independent of the number of threads (cores). Only `hash160(pubkey)` address types are kept — P2PKH (`1...`) and P2WPKH (`bc1q...`); P2SH (`3...`), P2WSH and Taproot (`bc1p...`) use a different payload the generator can never match, so they are excluded. (Adding the funded P2WPKH set will raise memory in proportion to its size.)
+This program uses approximately `1.3` GB of real memory with the <a href="/database/">current database</a> (`44,365,067` addresses kept as raw 20-byte `hash160` values in a hash set). Memory consumption scales with database size and is independent of the number of threads (cores). Only `hash160(pubkey)` address types are kept — P2PKH (`1...`) and P2WPKH (`bc1q...`); P2SH (`3...`), P2WSH and Taproot (`bc1p...`) use a different payload the generator can never match, so they are excluded.
 
-> Note: `ps`/`top` (RSS) may report ~1.4 GB for the process. That figure includes freed-but-not-yet-reclaimed pages left over from the parallel database load; the OS reclaims them on demand, so the true physical footprint is ~670 MB.
+> Note: `ps`/`top` (RSS) may report ~1.9 GB for the process. That figure includes freed-but-not-yet-reclaimed pages left over from the parallel database load; the OS reclaims them on demand, so the true physical footprint is ~1.3 GB.
 
 
 <a href="https://github.com/a137x/plutus-rustus/issues">Create an issue</a> so I can add more stuff to improve

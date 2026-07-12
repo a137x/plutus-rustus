@@ -31,7 +31,7 @@ use bitcoin::{Address, Network, PrivateKey};
 use ripemd::Ripemd160;
 use sha2::{Digest, Sha256};
 
-const DB_VER: &str = "JUL_11_2026";
+const DB_VER: &str = "JUL_12_2026";
 
 // Also derive and check the *uncompressed* P2PKH address for every key. Roughly
 // doubles the reachable share of the database (funded keys exist under both
@@ -388,7 +388,8 @@ fn load_database() -> Db {
     }
 
     let mut skipped = 0u64;
-    let mut db: Db = HashSet::with_capacity_and_hasher(26_000_000, Default::default());
+    // Pre-size for the bundled P2PKH + P2WPKH set (~44M) to avoid rehashing mid-load.
+    let mut db: Db = HashSet::with_capacity_and_hasher(48_000_000, Default::default());
 
     let shard_results: Vec<(Vec<[u8; 20]>, u64)> = thread::scope(|s| {
         let handles: Vec<_> = shards

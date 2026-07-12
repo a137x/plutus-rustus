@@ -29,14 +29,18 @@ into one in-memory set. The folder name is the snapshot date in `MON_DD_YYYY` fo
 
 ### How Many Addresses Does The Database Have?
 
-The current snapshot (`JUL_11_2026`) holds **`21,273,320` funded P2PKH addresses**,
-extracted from `56,827,685` total funded addresses of all types.
+The current snapshot (`JUL_12_2026`) holds **`44,365,067` funded addresses**:
 
-> Note: this bundled snapshot is currently **P2PKH-only** — it predates P2WPKH
-> support. The loader now also matches P2WPKH (`bc1q...`) addresses, but they only
-> take effect once the database is regenerated with the refresh steps below (the
-> `grep` now keeps `bc1q...` too). Since much of today's funded BTC lives in bech32,
-> refreshing meaningfully increases the reachable set at zero hot-loop cost.
+| type | prefix | count |
+|---|---|---:|
+| P2PKH | `1...` | 21,273,320 |
+| P2WPKH | `bc1q...` | 23,091,747 |
+
+Note that funded **bech32 (P2WPKH) addresses now outnumber legacy P2PKH** — earlier
+snapshots kept only P2PKH and discarded all of these, so including them roughly
+doubles the reachable set at zero cost in the hot loop (both decode to the same
+`hash160(pubkey)`). Excluded from the dump: `3...` (P2SH), longer `bc1q...` (P2WSH),
+and `bc1p...` (Taproot), none of which a P2PKH-style generator can match.
 
 ### How To Refresh The Database
 
