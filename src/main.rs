@@ -19,6 +19,7 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io::{Read, Write};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -324,8 +325,49 @@ fn report_hit(secp: &Secp256k1<All>, start_secret: &SecretKey, offset: u64, comp
 }
 
 // ---------------------------------------------------------------------------
-// Database loading: decode Base58Check once, keep only P2PKH hash160 bytes.
+// Database loading: decode each funded address once to its 20-byte hash160.
+//
+// We keep two address types, because both are hash160(compressed pubkey) — the
+// exact value the hot loop produces — so a single generated hash160 is checked
+// against both for free:
+//   - P2PKH   ("1..."):   Base58Check, version 0x00, 20-byte hash160.
+//   - P2WPKH  ("bc1q..."): native SegWit v0, whose 20-byte witness program *is*
+//                          that hash160. (Most funded BTC now lives here.)
+// Everything else (P2SH "3...", P2WSH, Taproot "bc1p...") can never match a
+// P2PKH-style generator and is skipped.
 // ---------------------------------------------------------------------------
+
+/// Decode a funded address to the 20-byte hash160 the hot loop matches against,
+/// or `None` if it is a type this generator can never produce.
+fn address_hash160(addr: &str) -> Option<[u8; 20]> {
+    match addr.as_bytes().first() {
+        // P2PKH: Base58Check, version byte 0x00 + 20-byte hash160.
+        Some(b'1') => {
+            let raw = bitcoin::base58::decode_check(addr).ok()?;
+            if raw.len() == 21 && raw[0] == 0x00 {
+                let mut h = [0u8; 20];
+                h.copy_from_slice(&raw[1..21]);
+                return Some(h);
+            }
+            None
+        }
+        // P2WPKH: bech32 v0 with a 20-byte program. Its scriptPubKey is
+        // OP_0 PUSH20 <hash160>, i.e. [0x00, 0x14, ..20 bytes..].
+        Some(b'b') if addr.starts_with("bc1") => {
+            let addr = bitcoin::Address::from_str(addr).ok()?.assume_checked();
+            let spk = addr.script_pubkey();
+            let b = spk.as_bytes();
+            if b.len() == 22 && b[0] == 0x00 && b[1] == 0x14 {
+                let mut h = [0u8; 20];
+                h.copy_from_slice(&b[2..22]);
+                return Some(h);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn load_database() -> Db {
     let dir = db_dir();
     let mut paths: Vec<_> = fs::read_dir(&dir)
@@ -362,7 +404,7 @@ fn load_database() -> Db {
     }
 
     println!(
-        "Loaded {} unique P2PKH addresses in {:.2?} ({} non-P2PKH/invalid entries skipped)",
+        "Loaded {} unique funded hash160s (P2PKH + P2WPKH) in {:.2?} ({} other/invalid entries skipped)",
         db.len(),
         timer.elapsed(),
         skipped
@@ -382,14 +424,9 @@ fn load_shard(paths: Vec<std::path::PathBuf>) -> (Vec<[u8; 20]>, u64) {
             serde_pickle::from_slice(&bytes, Default::default()).expect("couldn't load pickle");
 
         for addr in &addresses {
-            match bitcoin::base58::decode_check(addr) {
-                // version 0x00 + 20-byte hash160 == P2PKH ("1..." addresses)
-                Ok(raw) if raw.len() == 21 && raw[0] == 0x00 => {
-                    let mut h = [0u8; 20];
-                    h.copy_from_slice(&raw[1..21]);
-                    out.push(h);
-                }
-                _ => skipped += 1,
+            match address_hash160(addr) {
+                Some(h) => out.push(h),
+                None => skipped += 1,
             }
         }
         println!("Loaded {:?}", path.file_name().unwrap_or_default());
@@ -446,6 +483,40 @@ mod tests {
         let raw = bitcoin::base58::decode_check("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH").unwrap();
         assert_eq!(raw[0], 0x00);
         assert_eq!(&hash160(&pk.serialize())[..], &raw[1..21]);
+    }
+
+    // The DB loader must decode P2PKH and native-SegWit P2WPKH to the same 20-byte
+    // hash160 the hot loop produces. Both addresses below belong to private key 1
+    // (the P2WPKH one is the canonical BIP173 example).
+    #[test]
+    fn address_hash160_decodes_p2pkh_and_p2wpkh() {
+        let key1_hash160: [u8; 20] = [
+            0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4, 0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3,
+            0xa3, 0x23, 0xf1, 0x43, 0x3b, 0xd6,
+        ];
+        assert_eq!(
+            address_hash160("1BgGZ9tcN4rm9KBzDn7KprQz87SZ26SAMH"),
+            Some(key1_hash160),
+            "P2PKH"
+        );
+        assert_eq!(
+            address_hash160("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            Some(key1_hash160),
+            "P2WPKH"
+        );
+
+        // The generated compressed-pubkey hash160 for key 1 equals both.
+        let secp = Secp256k1::new();
+        let pk = PublicKey::from_secret_key(&secp, &secret_from_u8(1));
+        assert_eq!(hash160(&pk.serialize()), key1_hash160);
+
+        // Types this generator can never produce are rejected.
+        assert_eq!(address_hash160("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"), None, "P2SH");
+        assert_eq!(
+            address_hash160("bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"),
+            None,
+            "P2TR"
+        );
     }
 
     // Walking with `combine` (pub += G) must stay in lock-step with (start_secret + offset),

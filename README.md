@@ -113,7 +113,7 @@ set `CHECK_UNCOMPRESSED = true` in `src/main.rs`: ~2x reachable database coverag
 for ~10-15% throughput cost (the uncompressed path uses the scalar crate `hash160`).
 # Database FAQ
 
-An offline database of funded P2PKH addresses is used to check generated addresses. The bundled snapshot (`JUL_11_2026`) holds `21,273,320` currently-funded P2PKH addresses sourced from [Loyce Club](http://addresses.loyce.club/). See <a href="/database/">/database</a> for the format and refresh instructions.
+An offline database of funded addresses is used to check generated addresses. The loader keeps both **P2PKH** (`1...`) and native SegWit **P2WPKH** (`bc1q...`) addresses, since both encode `hash160(compressed pubkey)` and are matched in the same lookup. The bundled snapshot (`JUL_11_2026`) currently holds `21,273,320` P2PKH addresses sourced from [Loyce Club](http://addresses.loyce.club/); regenerate it (see <a href="/database/">/database</a>) to also include the funded P2WPKH set.
 
 # Expected Output
 
@@ -146,7 +146,7 @@ If a wallet with a balance is found, then all necessary information about the wa
 >15x5ugXCVkzTbs24mG2bu1RkpshW3FTYW8 // P2PKH wallet address
 
 # Memory Consumption
-This program uses approximately `0.7` GB of real memory (~670 MB, as reported by Activity Monitor's *Real Memory Size*) with the <a href="/database/">current database</a> (`21,273,320` P2PKH addresses kept as raw 20-byte `hash160` values). Memory consumption depends on database size and is independent of the number of threads (cores). Non-P2PKH entries (`3...` P2SH, `bc1...` bech32) are excluded from the database entirely, since a P2PKH generator can never match them.
+This program uses approximately `0.7` GB of real memory (~670 MB, as reported by Activity Monitor's *Real Memory Size*) with the <a href="/database/">current database</a> (`21,273,320` addresses kept as raw 20-byte `hash160` values). Memory consumption depends on database size and is independent of the number of threads (cores). Only `hash160(pubkey)` address types are kept — P2PKH (`1...`) and P2WPKH (`bc1q...`); P2SH (`3...`), P2WSH and Taproot (`bc1p...`) use a different payload the generator can never match, so they are excluded. (Adding the funded P2WPKH set will raise memory in proportion to its size.)
 
 > Note: `ps`/`top` (RSS) may report ~1.4 GB for the process. That figure includes freed-but-not-yet-reclaimed pages left over from the parallel database load; the OS reclaims them on demand, so the true physical footprint is ~670 MB.
 
