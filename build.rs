@@ -1,10 +1,10 @@
-// Compile the batched-EC shim against the vendored libsecp256k1 source.
+// Compile the batched-EC shim against the libsecp256k1 submodule source.
 //
 // The shim (csrc/shim.c) #includes depend/secp256k1/src/secp256k1.c to reach the
 // library's file-local `static` internals (batch affine-normalisation etc.), which
-// secp256k1-sys does not export. We compile that plus the two precomputed-table
-// translation units it references. Defines mirror secp256k1-sys's own build so the
-// vendored source configures identically.
+// the secp256k1 crate does not export. We compile that plus the two precomputed-table
+// translation units it references. depend/secp256k1 is a git submodule pinned to
+// bitcoin-core/secp256k1 v0.2.0; the defines below configure it to match.
 
 use std::path::PathBuf;
 
@@ -17,8 +17,8 @@ fn main() {
     b.include(&src);
     b.include(dep.join("include"));
     b.include(&dep);
-    // Match secp256k1-sys 0.8.2's ecmult table sizing so the vendored
-    // precomputed_ecmult*.c agree with secp256k1.c at link time.
+    // Size the ecmult tables so the submodule's precomputed_ecmult*.c agree
+    // with secp256k1.c at link time (upstream's v0.2.0 defaults).
     b.define("ECMULT_WINDOW_SIZE", "15");
     b.define("ECMULT_GEN_PREC_BITS", "4");
     b.define("SECP256K1_API", Some(""));

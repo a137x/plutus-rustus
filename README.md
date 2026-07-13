@@ -11,16 +11,25 @@ This began as a port of [Plutus](https://github.com/Isaacdelly/Plutus) and has s
 # Dependencies
 Tested in `rustc 1.92.0`
 For Rust dependencies see `Cargo.toml`. A C compiler is required at build time
-(`cc`): the elliptic-curve hot path uses a small C shim (`csrc/`) over a vendored
-copy of [libsecp256k1](https://github.com/bitcoin-core/secp256k1) in `depend/`.
+(`cc`): the elliptic-curve hot path uses a small C shim (`csrc/`) over
+[libsecp256k1](https://github.com/bitcoin-core/secp256k1) `v0.2.0`, pulled in as a
+git submodule at `depend/secp256k1` (see [Installation](#installation)).
 On aarch64 the SIMD `hash160` (`csrc/hash_neon.c`) is compiled in automatically;
 other targets fall back to the `sha2`/`ripemd` crates.
 Minimum <a href="#memory-consumption">RAM requirements</a>
 
 # Installation
 
+The libsecp256k1 C source is a git **submodule**, so clone recursively:
+
 ```
-$ git clone https://github.com/a137x/plutus-rustus.git
+$ git clone --recursive https://github.com/a137x/plutus-rustus.git
+```
+
+Already cloned without `--recursive`? Pull the submodule in:
+
+```
+$ git submodule update --init --recursive
 ```
 
 Compilation:
@@ -71,9 +80,9 @@ modular **field inversion per key** to bring each running point back to affine
 coordinates for hashing — the single largest cost (~80% of the loop). Instead, a
 batch of 512 points is accumulated in Jacobian coordinates (point additions, no
 inversion) and converted to affine with **one** inversion for the whole batch
-(Montgomery batch inversion). This runs on the vendored **libsecp256k1** field
-arithmetic (`depend/secp256k1`, called from `csrc/shim.c`) and is ~7x faster than
-one `combine` per key.
+(Montgomery batch inversion). This runs on the **libsecp256k1** field arithmetic
+(the `depend/secp256k1` submodule, called from `csrc/shim.c`) and is ~7x faster
+than one `combine` per key.
 
 **2. SIMD `hash160`.** `hash160 = RIPEMD-160(SHA-256(pubkey))`. On aarch64
 (`csrc/hash_neon.c`) the SHA-256 uses the ARMv8 crypto instructions and RIPEMD-160

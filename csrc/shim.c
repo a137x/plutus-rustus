@@ -1,4 +1,4 @@
-/* Batched sequential-pubkey walk over the vendored libsecp256k1 internals.
+/* Batched sequential-pubkey walk over the libsecp256k1 submodule internals.
  *
  * The hot loop needs, for a random start key k, the public keys of
  * k, k+1, k+2, ...  Each step is a point addition P += G. Doing that one key at
@@ -12,22 +12,22 @@
  * hand-tuned field arithmetic — measured ~7x faster on the EC step than per-key
  * combine, and correct against it bit-for-bit.
  *
- * We #include the vendored translation unit so the file-local `static` internals
- * are in scope. secp256k1-sys 0.8.2 sed-renames every symbol to
- * rustsecp256k1_v0_8_1_*; the macros below alias the ones we use.
+ * We #include the upstream translation unit so the file-local `static` internals
+ * are in scope. The macros below just give short local names to the upstream
+ * symbols we use.
  */
 #include "secp256k1.c"
 
 #include <stdlib.h>
 
-#define GE    rustsecp256k1_v0_8_1_ge
-#define GEJ   rustsecp256k1_v0_8_1_gej
-#define ADD   rustsecp256k1_v0_8_1_gej_add_ge
-#define ALL_A rustsecp256k1_v0_8_1_ge_set_all_gej_var
-#define SER   rustsecp256k1_v0_8_1_eckey_pubkey_serialize
-#define PARSE rustsecp256k1_v0_8_1_eckey_pubkey_parse
-#define SETGE rustsecp256k1_v0_8_1_gej_set_ge
-#define GEN   rustsecp256k1_v0_8_1_ge_const_g
+#define GE    secp256k1_ge
+#define GEJ   secp256k1_gej
+#define ADD   secp256k1_gej_add_ge
+#define ALL_A secp256k1_ge_set_all_gej_var
+#define SER   secp256k1_eckey_pubkey_serialize
+#define PARSE secp256k1_eckey_pubkey_parse
+#define SETGE secp256k1_gej_set_ge
+#define GEN   secp256k1_ge_const_g
 
 typedef struct {
     GEJ  p;      /* next point to emit, in Jacobian coordinates */
